@@ -128,9 +128,34 @@ func runTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) error {
 	}
 }
 
+// Processes one Quad value for use in inserts, adding it to the insertValue map if i needs to be written
+func processQuadDirection(insertValue map[int][]interface{}, val quad.Value) (hash NodeHash) {
+
+		if val == nil {
+			return
+		}
+		hash = hashOf(val)
+		if !hash.Valid() {
+			return
+		} else if _, ok := nodeCache.Get(hash); ok {
+			return
+		}
+		nodeKey, values, err := nodeValues(hash, val)
+		if err != nil {
+			panic(err)
+		}
+
+		if _, ok := insertValue[nodeKey]; !ok {
+			insertValue[nodeKey] = make([]interface{}, 0)
+		}
+		insertValue[nodeKey] = append(insertValue[nodeKey], values...)
+		nodeCache.Add(hash, struct{}{})
+	return
+}
+
 // tryRunTxCockroach runs the transaction (without retrying).
 // For automatic retry upon retryable error use runTxCockroach
-func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) error {
+func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) (err error) {
 	//allAdds := true
 	//for _, d := range in {
 	//	if d.Action != graph.Add {
@@ -141,6 +166,15 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) erro
 	//	return qs.copyFrom(tx, in, opts)
 	//}
 
+	defer func() {
+		if r := recover(); r != nil {
+				var ok bool
+				err, ok = r.(error)
+			if !ok {
+				err = fmt.Errorf("tx run error: %v", r)
+			}
+		}
+	}()
 	end := ";"
 	if true || opts.IgnoreDup {
 		end = " ON CONFLICT (subject_hash, predicate_hash, object_hash) DO NOTHING"
@@ -149,13 +183,9 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) erro
 
 	var (
 		insertQuad  *sql.Stmt
-		//inserted    map[NodeHash]struct{} // tracks already inserted values
 
 		deleteQuad   *sql.Stmt
 		deleteTriple *sql.Stmt
-
-		// error used for bellow processes
-		err error
 	)
 	quadValues := make([]interface{}, 0)
 	insertValue := make(map[int][]interface{})     // items to be added for each type
@@ -164,51 +194,16 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) erro
 	for _, d := range in {
 		switch d.Action {
 		case graph.Add:
-
-			var hs, hp, ho, hl NodeHash
-			for _, dir := range quad.Directions {
-				v := d.Quad.Get(dir)
-				if v == nil {
-					continue
-				}
-				h := hashOf(v)
-				switch dir {
-				case quad.Subject:
-					hs = h
-				case quad.Predicate:
-					hp = h
-				case quad.Object:
-					ho = h
-				case quad.Label:
-					hl = h
-				}
-				if !h.Valid() {
-					continue
-				} else if _, ok := nodeCache.Get(h); ok {
-					continue
-				}
-				nodeKey, values, err := nodeValues(h, v)
-				if err != nil {
-					return err
-				}
-
-				if _, ok := insertValue[nodeKey]; !ok {
-					insertValue[nodeKey] = make([]interface{}, 0)
-				}
-				insertValue[nodeKey] = append(insertValue[nodeKey], values...)
-				nodeCache.Add(h, struct{}{})
-			}
 			quadNum++
 			quadValues = append(quadValues,
-				hs.toSQL(), hp.toSQL(), ho.toSQL(), hl.toSQL(),
+				processQuadDirection(insertValue, d.Quad.Subject).toSQL(),
+				processQuadDirection(insertValue, d.Quad.Predicate).toSQL(),
+				processQuadDirection(insertValue, d.Quad.Object).toSQL(),
+				processQuadDirection(insertValue, d.Quad.Label).toSQL(),
 				d.ID.Int(),
 				d.Timestamp,
 			)
-			//_, err := insertQuad.Exec(
-			//	hs.toSQL(), hp.toSQL(), ho.toSQL(), hl.toSQL(),
-			//	d.ID.Int(),
-			//	d.Timestamp,
-			//)
+
 			if err != nil {
 				clog.Errorf("couldn't exec INSERT statement: %v", err)
 				return err
@@ -281,25 +276,10 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) erro
 		if err != nil {
 			return err
 		}
-		//for index, _ := range valueLists {
-		//	fmt.Printf("%v - %v ---- %#v \n", nodeKey, index, nodeInsertColumns[nodeKey])
-		//	var ph = make([]string, len(values)-1)
-		//	for i := range ph {
-		//		ph[i] = "$" + strconv.FormatInt(int64(i)+2, 10)
-		//	}
-		//
-		//}
-		//stmt, err = tx.Prepare(`INSERT INTO nodes(hash, ` +
-		//	strings.Join(nodeInsertColumns[nodeKey], ", ") +
-		//	`) VALUES ($1, ` +
-		//	strings.Join(ph, ", ") +
-		//	`) ON CONFLICT (hash) DO NOTHING;`)
-		//if err != nil {
-		//	return err
-	//}
 	}
 
 
+	// quad insert
 	if quadNum > 0 {
 		insertQuadStr := `INSERT INTO quads(subject_hash, predicate_hash, object_hash, label_hash, id, ts) VALUES `
 		for i := uint64(0); ; i++ {
