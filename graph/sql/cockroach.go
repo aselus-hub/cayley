@@ -182,8 +182,6 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) (err
 	end += " RETURNING NOTHING;"
 
 	var (
-		insertQuad  *sql.Stmt
-
 		deleteQuad   *sql.Stmt
 		deleteTriple *sql.Stmt
 	)
@@ -268,11 +266,7 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) (err
 		}
 		insertStr += " ON CONFLICT (hash) DO NOTHING RETURNING NOTHING;"
 
-		insertItem, err := tx.Prepare(insertStr)
-		if err != nil {
-			return err
-		}
-		_, err = insertItem.Exec(valueLists...)
+		_, err = tx.Exec(insertStr, valueLists...)
 		if err != nil {
 			return err
 		}
@@ -292,14 +286,8 @@ func tryRunTxCockroach(tx *sql.Tx, in []graph.Delta, opts graph.IgnoreOpts) (err
 			}
 		}
 		insertQuadStr += end
-		insertQuad, err = tx.Prepare(insertQuadStr)
+		_, err = tx.Exec(insertQuadStr, quadValues...)
 		if err != nil {
-			fmt.Println("111")
-			return err
-		}
-		_, err = insertQuad.Exec(quadValues...)
-		if err != nil {
-			fmt.Println("111")
 			return err
 		}
 
